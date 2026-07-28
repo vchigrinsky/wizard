@@ -21,5 +21,25 @@
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/anchor-js/4.1.0/anchor.min.js" integrity="sha256-lZaRhKri35AyJSypXXs4o6OPFTbTmUoltBbDCbdzegg=" crossorigin="anonymous"></script>
     <script>anchors.add();</script>
+    <script>
+      document.addEventListener('click', async function (event) {
+        var link = event.target.closest('a.js-copy-markdown');
+        if (!link) return;
+        event.preventDefault();
+        var url = link.getAttribute('href');
+        var original = link.textContent;
+        try {
+          var response = await fetch(url);
+          if (!response.ok) throw new Error('fetch failed');
+          var text = await response.text();
+          await navigator.clipboard.writeText(text);
+          link.textContent = 'Скопировано';
+          setTimeout(function () { link.textContent = original; }, 1500);
+        } catch (err) {
+          link.textContent = 'Не удалось скопировать';
+          setTimeout(function () { link.textContent = original; }, 2000);
+        }
+      });
+    </script>
   </body>
 </html>
