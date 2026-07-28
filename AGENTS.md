@@ -20,7 +20,7 @@
 
 ## Текущее состояние на 28.07.2026
 
-Локальная директория: `/Users/v/wizard` (раньше называлась `vpsconfig`).
+Основная разработка предполагается в Cursor Cloud Agent поверх репозитория `vchigrinsky/wizard`, а не в привязке к конкретной машине. Локальный путь на машине автора, если он есть: `/Users/v/wizard` (раньше называлась `vpsconfig`); облачному агенту на него ориентироваться не нужно.
 
 Публичный Git-репозиторий: [github.com/vchigrinsky/wizard](https://github.com/vchigrinsky/wizard).  
 Основная и единственная ветка по умолчанию: `master` (не `main`).  
@@ -243,7 +243,7 @@ Pages собирается legacy-сборкой GitHub из ветки `master`
 
 ## Облачные агенты Cursor
 
-Пользователь планирует продолжать работу над этим репозиторием через Cursor Cloud Agents, а не только локально.
+Основной ожидаемый режим работы — Cursor Cloud Agents поверх этого репозитория. Локальная сессия на машине автора возможна, но не является точкой опоры для handoff.
 
 - Репозиторий к Cloud Agent подключается через Cursor GitHub App: [Dashboard → Integrations](https://cursor.com/dashboard/integrations), не через поле PAT в Settings IDE.
 - Для обычных правок, push и PR достаточно GitHub App.
