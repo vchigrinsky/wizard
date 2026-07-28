@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+import json
+import os
+import sqlite3
+import time
+from collections import defaultdict, deque
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
+
+DB_PATH = os.environ.get("XUI_DB", "/etc/x-ui/x-ui.db")
+STATE_DB = os.environ.get("BWMON_STATE_DB", "/opt/xui-bandwidth-monitor/state.db")
+HOST = os.environ.get("BWMON_HOST", "0.0.0.0")
+PORT = int(os.environ.get("BWMON_PORT", "18080"))
+TOKEN = os.environ.get("BWMON_TOKEN", "")
+WINDOWS = (1, 10, 60, 300)
+MOSCOW = ZoneInfo("Europe/Moscow")
+
+history = defaultdict(deque)
+
+HTML = r"""
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>3x-ui Bandwidth Monitor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #10131a;
+      --panel: #1b1f2a;
+      --panel-2: #202636;
+      --border: #2b3242;
+      --text: #e7eaf0;
+      --muted: #9aa3b2;
+      --accent: #2f6fed;
+      --accent-border: #5b8cff;
+      --badge: #273043;
+      --badge-text: #cbd5e1;
+      --online: #123d2a;
+      --online-text: #79f2b1;
+      --offline-opacity: .42;
+      --shadow: rgba(0,0,0,.35);
+    }
+    html[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f4f6fb;
+      --panel: #ffffff;
+      --panel-2: #eef2f8;
+      --border: #d8dfeb;
+      --text: #151923;
+      --muted: #667085;
+      --accent: #2563eb;
+      --accent-border: #3b82f6;
+      --badge: #e8edf6;
+      --badge-text: #344054;
+      --online: #dcfce7;
+      --online-text: #166534;
+      --offline-opacity: .45;
+      --shadow: rgba(20,30,50,.16);
+    }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 1180px; margin: 28px auto; padding: 0 20px; }
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    .muted { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 18px 0; flex-wrap: wrap; }
+    .tabs { display: flex; gap: 8px; }
+    .tab, .theme-toggle { border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 999px; padding: 8px 14px; font-size: 15px; cursor: pointer; }
+    .tab.active { background: var(--accent); border-color: var(--accent-border); color: #fff; }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; }
+    .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    .card .value { font-size: 22px; margin-top: 5px; font-variant-numeric: tabular-nums; }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; box-shadow: 0 18px 50px var(--shadow); }
+    th, td { padding: 12px 12px; border-bottom: 1px solid var(--border); text-align: right; font-variant-numeric: tabular-nums; }
+    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; background: var(--panel-2); user-select: none; }
+    th.sortable { cursor: pointer; }
+    th.sortable:hover, th.sorted { color: var(--text); }
+    tr:last-child td { border-bottom: 0; }
+    .email { font-weight: 650; color: var(--text); }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; background: var(--badge); color: var(--badge-text); font-size: 12px; }
+    .online { background: var(--online); color: var(--online-text); }
+    tr.offline { opacity: var(--offline-opacity); }
+    .rate { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 102px; }
+    .rate-part { display: inline-flex; align-items: center; gap: 3px; }
+    .rate svg { width: 13px; height: 13px; vertical-align: -2px; }
+    .down-icon { color: #22c55e; }
+    .up-icon { color: #ef4444; }
+    .err { color: #ff5c5c; white-space: pre-wrap; }
+    @media (max-width: 980px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 680px) { main { padding: 0 10px; } .cards { grid-template-columns: 1fr; } th, td { padding: 9px 8px; font-size: 13px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>3x-ui Bandwidth Monitor</h1>
+  <div class="muted">Per-user bandwidth. Values are shown as down / up Mbps.</div>
+  <div class="topbar">
+    <div class="tabs" id="tabs"></div>
+    <button class="theme-toggle" id="themeToggle">Light</button>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="label">1s Sum Down / Up</div><div class="value" id="sum1">0.0 / 0.0</div></div>
+    <div class="card"><div class="label">10s Sum Down / Up</div><div class="value" id="sum10">0.0 / 0.0</div></div>
+    <div class="card"><div class="label">1m Sum Down / Up</div><div class="value" id="sum60">0.0 / 0.0</div></div>
+    <div class="card"><div class="label">5m Sum Down / Up</div><div class="value" id="sum300">0.0 / 0.0</div></div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>User</th>
+      <th>Inbound</th>
+      <th class="sortable" data-sort="rate_1">1s</th>
+      <th class="sortable sorted" data-sort="rate_10">10s</th>
+      <th class="sortable" data-sort="rate_60">1m</th>
+      <th class="sortable" data-sort="rate_300">5m</th>
+      <th>Last Online</th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="7" class="muted">Waiting for data...</td></tr></tbody>
+  </table>
+  <p id="error" class="err"></p>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+let activeRoute = "nl";
+let sortKey = "rate_10";
+let latest = null;
+
+const routeLabels = { nl: "🇳🇱", kz: "🇰🇿" };
+const lastFmt = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Europe/Moscow" });
+
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+function fmt(v) { return Number(v || 0).toFixed(1); }
+const downSvg = `<svg class="down-icon" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 16 16" aria-label="down"><path fill-rule="evenodd" d="M8 1a.5.5 0 0 1 .5.5v11.793l3.146-3.147a.5.5 0 0 1 .708.708l-4 4a.5.5 0 0 1-.708 0l-4-4a.5.5 0 0 1 .708-.708L7.5 13.293V1.5A.5.5 0 0 1 8 1"/></svg>`;
+const upSvg = `<svg class="up-icon" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 16 16" aria-label="up"><path fill-rule="evenodd" d="M8 15a.5.5 0 0 0 .5-.5V2.707l3.146 3.147a.5.5 0 0 0 .708-.708l-4-4a.5.5 0 0 0-.708 0l-4 4a.5.5 0 1 0 .708.708L7.5 2.707V14.5a.5.5 0 0 0 .5.5"/></svg>`;
+function rateText(rate) {
+  return `<span class="rate"><span class="rate-part">${fmt(rate?.down)} ${downSvg}</span><span>/</span><span class="rate-part">${fmt(rate?.up)} ${upSvg}</span></span>`;
+}
+function fmtLast(ms) {
+  if (!ms) return "-";
+  const d = new Date(ms);
+  if (isNaN(d)) return "-";
+  return lastFmt.format(d).replace(",", "");
+}
+function sortRows(rows) {
+  return [...rows].sort((a, b) => {
+    if (a.online !== b.online) return a.online ? -1 : 1;
+    const bd = b.rates?.[sortKey]?.down || 0;
+    const ad = a.rates?.[sortKey]?.down || 0;
+    if (bd !== ad) return bd - ad;
+    return a.email.localeCompare(b.email);
+  });
+}
+function renderTabs(routes) {
+  const order = ["nl", "kz", ...routes.filter(r => !["nl", "kz"].includes(r))].filter((r, i, a) => routes.includes(r) && a.indexOf(r) === i);
+  if (!order.includes(activeRoute)) activeRoute = order[0] || "nl";
+  document.getElementById("tabs").innerHTML = order.map(r => `<button class="tab ${r === activeRoute ? "active" : ""}" data-route="${esc(r)}">${routeLabels[r] || esc(r)}</button>`).join("");
+}
+function renderSortHeaders() {
+  document.querySelectorAll("th[data-sort]").forEach(th => th.classList.toggle("sorted", th.dataset.sort === sortKey));
+}
+function render() {
+  if (!latest) return;
+  const routes = latest.routes || [];
+  renderTabs(routes);
+  renderSortHeaders();
+  const tab = latest.tabs[activeRoute] || { users: [], summary: {} };
+  const rows = sortRows(tab.users || []);
+  for (const w of [1, 10, 60, 300]) {
+    const r = tab.summary?.[`rate_${w}`] || { down: 0, up: 0 };
+    document.getElementById(`sum${w}`).innerHTML = rateText(r);
+  }
+  document.getElementById("rows").innerHTML = rows.map(u => `
+    <tr class="${u.online ? "" : "offline"}">
+      <td><span class="email">${esc(u.email)}</span></td>
+      <td><span class="badge ${u.online ? "online" : ""}">${esc(u.inbound || "-")}</span></td>
+      <td>${rateText(u.rates.rate_1)}</td>
+      <td>${rateText(u.rates.rate_10)}</td>
+      <td>${rateText(u.rates.rate_60)}</td>
+      <td>${rateText(u.rates.rate_300)}</td>
+      <td>${fmtLast(u.last_online)}</td>
+    </tr>`).join("") || `<tr><td colspan="7" class="muted">No users</td></tr>`;
+}
+async function tick() {
+  try {
+    const r = await fetch(`/api?token=${encodeURIComponent(token)}`, { cache: "no-store" });
+    if (!r.ok) throw new Error(await r.text());
+    latest = await r.json();
+    document.getElementById("error").textContent = "";
+    render();
+  } catch (e) {
+    document.getElementById("error").textContent = String(e);
+  }
+}
+document.getElementById("tabs").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-route]");
+  if (!btn) return;
+  activeRoute = btn.dataset.route;
+  render();
+});
+document.querySelectorAll("th[data-sort]").forEach(th => th.addEventListener("click", () => {
+  sortKey = th.dataset.sort;
+  render();
+}));
+document.getElementById("themeToggle").addEventListener("click", () => {
+  const html = document.documentElement;
+  const next = html.dataset.theme === "dark" ? "light" : "dark";
+  html.dataset.theme = next;
+  localStorage.setItem("bwmon-theme", next);
+  document.getElementById("themeToggle").textContent = next === "dark" ? "Light" : "Dark";
+});
+const savedTheme = localStorage.getItem("bwmon-theme") || "dark";
+document.documentElement.dataset.theme = savedTheme;
+document.getElementById("themeToggle").textContent = savedTheme === "dark" ? "Light" : "Dark";
+setInterval(tick, 1000);
+tick();
+</script>
+</body>
+</html>
+"""
+
+def require_token(handler):
+    if not TOKEN:
+        return True
+    qs = parse_qs(urlparse(handler.path).query)
+    return qs.get("token", [""])[0] == TOKEN
+
+def init_state():
+    os.makedirs(os.path.dirname(STATE_DB), exist_ok=True)
+    con = sqlite3.connect(STATE_DB)
+    con.execute("""
+        create table if not exists monthly_baselines (
+            month text not null,
+            email text not null,
+            base_up integer not null,
+            base_down integer not null,
+            last_up integer not null,
+            last_down integer not null,
+            updated_at integer not null,
+            primary key (month, email)
+        )
+    """)
+    con.commit()
+    con.close()
+
+def read_xui():
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
+    con.row_factory = sqlite3.Row
+    rows = con.execute("""
+        select ct.email, ct.up, ct.down, ct.last_online, i.remark as inbound
+        from client_traffics ct
+        left join inbounds i on i.id = ct.inbound_id
+        where ct.enable = 1
+        order by ct.email
+    """).fetchall()
+    settings = {r["key"]: r["value"] for r in con.execute("select key, value from settings").fetchall()}
+    con.close()
+    return rows, settings
+
+def routing_map(settings):
+    try:
+        cfg = json.loads(settings.get("xrayTemplateConfig") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    outbounds = {o.get("tag", ""): o for o in cfg.get("outbounds", []) if o.get("tag")}
+    result = {}
+    for rule in cfg.get("routing", {}).get("rules", []):
+        outbound = rule.get("outboundTag")
+        users = rule.get("user") or []
+        if not outbound or outbound not in outbounds:
+            continue
+        tag = outbound.lower()
+        route = None
+        if tag.startswith("nl") or "-nl" in tag or "nl-" in tag:
+            route = "nl"
+        elif tag.startswith("kz") or "-kz" in tag or "kz-" in tag:
+            route = "kz"
+        if not route:
+            continue
+        for user in users:
+            result[user] = {"route": route, "outbound": outbound}
+    return result
+
+def month_key(ts=None):
+    dt = datetime.fromtimestamp(ts or time.time(), MOSCOW)
+    return f"{dt.year:04d}-{dt.month:02d}"
+
+def update_monthly(rows):
+    key = month_key()
+    now_ms = int(time.time() * 1000)
+    con = sqlite3.connect(STATE_DB)
+    for row in rows:
+        email = row["email"]
+        up = int(row["up"] or 0)
+        down = int(row["down"] or 0)
+        exists = con.execute("select 1 from monthly_baselines where month=? and email=?", (key, email)).fetchone()
+        if exists is None:
+            con.execute("insert into monthly_baselines(month,email,base_up,base_down,last_up,last_down,updated_at) values(?,?,?,?,?,?,?)", (key, email, up, down, up, down, now_ms))
+        else:
+            con.execute("update monthly_baselines set last_up=?, last_down=?, updated_at=? where month=? and email=?", (up, down, now_ms, key, email))
+    con.commit()
+    con.close()
+
+def rates_for(email, up, down, now):
+    q = history[email]
+    q.append((now, up, down))
+    cutoff = now - max(WINDOWS)
+    while len(q) > 1 and q[0][0] < cutoff:
+        q.popleft()
+    rates = {}
+    for w in WINDOWS:
+        target = now - w
+        sample = q[0]
+        for point in q:
+            if point[0] <= target:
+                sample = point
+            else:
+                break
+        elapsed = max(now - sample[0], 0.001)
+        # For warmup, divide by elapsed; once enough samples exist this becomes the requested window.
+        up_delta = max(up - sample[1], 0)
+        down_delta = max(down - sample[2], 0)
+        rates[f"rate_{w}"] = {
+            "up": up_delta * 8 / elapsed / 1_000_000,
+            "down": down_delta * 8 / elapsed / 1_000_000,
+        }
+    return rates
+
+def build_snapshot():
+    now = time.time()
+    rows, settings = read_xui()
+    update_monthly(rows)
+    route_by_user = routing_map(settings)
+    online_cutoff_ms = int((now - 120) * 1000)
+    tabs = {"nl": {"users": []}, "kz": {"users": []}}
+
+    for r in rows:
+        email = r["email"]
+        route_info = route_by_user.get(email)
+        if not route_info:
+            continue
+        up = int(r["up"] or 0)
+        down = int(r["down"] or 0)
+        last_online = int(r["last_online"] or 0)
+        user = {
+            "email": email,
+            "inbound": r["inbound"] or "",
+            "last_online": last_online,
+            "online": bool(last_online and last_online >= online_cutoff_ms),
+            "rates": rates_for(email, up, down, now),
+        }
+        tabs.setdefault(route_info["route"], {"users": []})["users"].append(user)
+
+    visible_routes = []
+    for route, tab in tabs.items():
+        if tab["users"]:
+            visible_routes.append(route)
+        summary = {}
+        for w in WINDOWS:
+            key = f"rate_{w}"
+            summary[key] = {
+                "down": sum(u["rates"][key]["down"] for u in tab["users"]),
+                "up": sum(u["rates"][key]["up"] for u in tab["users"]),
+            }
+        tab["summary"] = summary
+    ordered_routes = [r for r in ["nl", "kz"] if r in visible_routes] + [r for r in visible_routes if r not in ("nl", "kz")]
+    return {"ts": int(now * 1000), "routes": ordered_routes, "tabs": tabs, "windows": list(WINDOWS)}
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path not in ("/", "/api"):
+            self.send_error(404)
+            return
+        if not require_token(self):
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Forbidden")
+            return
+        if path == "/api":
+            try:
+                body = json.dumps(build_snapshot(), ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = f"{type(exc).__name__}: {exc}".encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            return
+        body = HTML.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, fmt, *args):
+        return
+
+if __name__ == "__main__":
+    init_state()
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    print(f"Listening on {HOST}:{PORT}", flush=True)
+    server.serve_forever()

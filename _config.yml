@@ -1,0 +1,13 @@
+title: wizard
+description: Материалы канала vuutya
+url: https://vchigrinsky.github.io
+baseurl: /wizard
+theme: jekyll-theme-primer
+lang: ru
+markdown: kramdown
+exclude:
+  - AGENTS.md
+  - xui-bandwidth-app.py
+  - xui-bandwidth-app.py.bak
+  - "*.bak"
+  - README.md
