@@ -30,6 +30,8 @@
 
 ```text
 .gitignore
+.cursor/environment.json
+.cursor/setup-ssh.sh
 _config.yml
 index.md
 01-connect-vpn-victor.md
@@ -231,6 +233,8 @@ Pages собирается legacy-сборкой GitHub из ветки `master`
 - Репозиторий к Cloud Agent подключается через Cursor GitHub App: [Dashboard → Integrations](https://cursor.com/dashboard/integrations), не через поле PAT в Settings IDE.
 - Для обычных правок, push и PR достаточно GitHub App.
 - Для расширенных операций через `gh`/API (создание и удаление репозиториев, управление Pages и т.п.) PAT кладут в [Cloud Agents → Secrets](https://cursor.com/dashboard/cloud-agents). Лучше не называть секрет `GH_TOKEN`: Cursor может подставить туда собственный App-токен `ghs_…`. Удобнее `GITHUB_PAT` / `MY_GH_TOKEN` и явная авторизация `gh` из этого секрета.
+- Доступ к VPS: пары секретов `SSH_<PROVIDER>_<CC>` (приватный ключ в base64 одной строкой) и `IP_<PROVIDER>_<CC>` (IPv4). Пример: `SSH_BEGET_RU` + `IP_BEGET_RU`. При старте VM `bash .cursor/setup-ssh.sh` раскладывает их в `~/.ssh` и пишет `~/.ssh/config`. Ходить так: `ssh beget-ru`, `ssh timeweb-nl` (алиас = суффикс секрета в нижнем регистре, `_` → `-`). Не декодируйте ключи вручную и не вызывайте `ssh -i` по сырому base64, если setup уже отработал. Если хостов в `~/.ssh/config` нет — сначала запустите скрипт. Ключи и IP в git не коммитить.
+- Если окружение в Dashboard персональное (не из репо), в поле **Install** того же environment тоже укажите `bash .cursor/setup-ssh.sh`, иначе `environment.json` из репозитория может не подхватиться.
 - Запуск: режим Cloud в IDE или [cursor.com/agents](https://cursor.com/agents) с выбором `vchigrinsky/wizard`.
 
 ## Известные сетевые наблюдения, не включённые в статьи
@@ -262,3 +266,4 @@ Pages собирается legacy-сборкой GitHub из ветки `master`
 - Dev-сервер: `jekyll serve --host 0.0.0.0 --port 4000`. Из-за `baseurl: /wizard` локальные страницы открываются по префиксу: `http://localhost:4000/wizard/`, посты — `http://localhost:4000/wizard/01-connect-vpn-victor`. Без `/wizard` будет 404.
 - Разовая проверка сборки без сервера: `jekyll build` кладёт результат в `_site/` (в `.gitignore`).
 - Gemfile намеренно не добавлен: легаси-сборка Pages использует свой набор гемов, локально его повторяет `github-pages`.
+- `.cursor/environment.json` задаёт `install: bash .cursor/setup-ssh.sh`. Скрипт ищет все `IP_*`, для каждого суффикса берёт парный `SSH_*`, base64-декодирует ключ в `~/.ssh/id_<alias>` и добавляет `Host <alias>` (User `root`). Публичные `.pub` в секретах не нужны. После добавления или переименования секретов запускайте нового агента.
