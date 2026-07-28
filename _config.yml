@@ -7,5 +7,3 @@ lang: ru
 markdown: kramdown
 exclude:
   - LOG.md
-readme_index:
-  with_frontmatter: true
