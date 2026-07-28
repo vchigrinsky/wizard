@@ -6,5 +6,6 @@ theme: jekyll-theme-primer
 lang: ru
 markdown: kramdown
 exclude:
-  - AGENTS.md
+  - LOG.md
   - README.md
+  - .cursor
