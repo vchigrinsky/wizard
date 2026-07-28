@@ -3,5 +3,5 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-  "install": "bash .cursor/setup-ssh.sh"
+  "install": "bash .cursor/setup-ssh.sh && bash .cursor/setup-mdpdf.sh"
 }

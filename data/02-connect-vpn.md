@@ -1,8 +1,4 @@
-[← Все материалы](./)
-
 # Как подключиться к своему ВПН
-
-<a href="./data/02-connect-vpn.pdf" download="02-connect-vpn.pdf">Скачать PDF</a> · <a href="https://github.com/vchigrinsky/wizard/raw/master/data/02-connect-vpn.md" download="02-connect-vpn.md">Скачать Markdown</a>
 
 Для подключения подойдёт любой клиент с поддержкой протокола VLESS, например v2RayTun, Happ, Amnezia, Hiddify, Karing. Ниже приведена инструкция для v2RayTun.
 
