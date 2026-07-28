@@ -7,7 +7,4 @@ lang: ru
 markdown: kramdown
 exclude:
   - AGENTS.md
-  - xui-bandwidth-app.py
-  - xui-bandwidth-app.py.bak
-  - "*.bak"
   - README.md
