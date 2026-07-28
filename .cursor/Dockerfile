@@ -20,8 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Match the previously used Cloud snapshot stack (github-pages 232 / Jekyll 3.10.x).
 RUN gem install --no-document github-pages -v 232
 
-RUN useradd -ms /bin/bash ubuntu \
-    && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+# ubuntu:24.04 already ships a non-root `ubuntu` user — only ensure passwordless sudo.
+RUN echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
 USER ubuntu
 WORKDIR /home/ubuntu
