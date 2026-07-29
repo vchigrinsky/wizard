@@ -1,8 +1,4 @@
-[← Все материалы](https://vchigrinsky.github.io/wizard/)
-
 # Пользовательский опыт и мысли вслух
-
-<a href="../data/03-two-months-with-vpn.pdf" download="03-two-months-with-vpn.pdf">Скачать PDF</a> · <a href="https://raw.githubusercontent.com/vchigrinsky/wizard/master/data/03-two-months-with-vpn.md" class="js-copy-markdown">Скопировать Markdown</a>
 
 Это не техническая инструкция, а рефлексия по опыту использования и обратной связи после двух месяцев работы ВПН ВИКТОР.
 
