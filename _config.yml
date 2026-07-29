@@ -7,4 +7,5 @@ lang: ru
 markdown: kramdown
 exclude:
   - LOG.md
+  - PUBLICATIONS.md
   - data/*.md
