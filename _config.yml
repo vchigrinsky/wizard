@@ -9,3 +9,5 @@ exclude:
   - LOG.md
   - PUBLICATIONS.md
   - data/*.md
+  - scripts/
+  - vless.md

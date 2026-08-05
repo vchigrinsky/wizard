@@ -1,0 +1,434 @@
+"""Общие помощники для автоматизации двухузловой VLESS-схемы.
+
+Модуль знает три вещи:
+
+* как разбирать алиасы вида ``hosting_country`` и строить из них имена
+  клиентов, outbound'ов и меток маршрутов;
+* как ходить по SSH на узел (с мультиплексированием, чтобы десятки вызовов
+  подряд не открывали каждый раз новое соединение);
+* как разговаривать с API панели 3x-ui, которое слушает только на 127.0.0.1
+  удалённой машины — поэтому все вызовы идут через ``curl`` на самом сервере.
+
+Ничего специфичного для конкретного хостинга здесь нет: всё, что нужно
+скриптам, выводится из алиаса и из ``~/.ssh/config``.
+"""
+
+from __future__ import annotations
+
+import atexit
+import hashlib
+import json
+import os
+import re
+import secrets
+import shlex
+import subprocess
+import sys
+import time
+import urllib.parse
+
+# --- Константы схемы -------------------------------------------------------
+
+#: Единственный inbound на каждом узле называется так.
+INBOUND_REMARK = "main"
+
+#: Префикс клиента на российском узле: ``vvchigrinskii-to-<hosting>-<country>``.
+RU_CLIENT_PREFIX = "vvchigrinskii-to"
+
+#: Префикс клиента на зарубежном узле: ``main-from-<hosting>-<country>``.
+FOREIGN_CLIENT_PREFIX = "main-from"
+
+#: Reality-маскировка: чем прикидывается узел в каждой из ролей.
+SNI_BY_ROLE = {"ru": "www.yandex.ru", "foreign": "www.google.com"}
+
+#: Версии, на которых схема проверена (см. docs/01-setup-vpn.md).
+XUI_VERSION = "v3.5.0"
+XRAY_VERSION = "v26.6.27"
+
+#: Порт Xray по умолчанию и запасные, если основной занят.
+PREFERRED_PORTS = [443, 8443, 2053]
+
+XUI_INSTALL_URL = "https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh"
+
+ALIAS_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)_([a-z]{2})$")
+
+
+class VpnKitError(RuntimeError):
+    """Ошибка, которую имеет смысл показать пользователю как есть."""
+
+
+# --- Алиасы, имена, метки --------------------------------------------------
+
+
+def parse_alias(alias: str) -> tuple[str, str]:
+    """``timeweb_nl`` -> ``("timeweb", "nl")``."""
+    m = ALIAS_RE.match(alias)
+    if not m:
+        raise VpnKitError(
+            f"алиас {alias!r} не по формату; ожидается <hosting>_<country>, "
+            "например timeweb_nl или selectel_kz"
+        )
+    return m.group(1), m.group(2)
+
+
+def flag(country: str) -> str:
+    """``nl`` -> ``🇳🇱`` (regional indicator symbols)."""
+    return "".join(chr(0x1F1E6 + ord(c) - ord("a")) for c in country.lower())
+
+
+def route_label(foreign_alias: str, ru_alias: str) -> str:
+    """Метка маршрута в том же виде, в каком она лежит в vless.md."""
+    fh, fc = parse_alias(foreign_alias)
+    rh, rc = parse_alias(ru_alias)
+    return f"{flag(fc)} {fh} ← {flag(rc)} {rh}"
+
+
+def ru_client_email(foreign_alias: str) -> str:
+    fh, fc = parse_alias(foreign_alias)
+    return f"{RU_CLIENT_PREFIX}-{fh}-{fc}"
+
+
+def foreign_client_email(ru_alias: str) -> str:
+    rh, rc = parse_alias(ru_alias)
+    return f"{FOREIGN_CLIENT_PREFIX}-{rh}-{rc}"
+
+
+def outbound_tag(foreign_alias: str) -> str:
+    fh, fc = parse_alias(foreign_alias)
+    return f"{fh}-{fc}-main"
+
+
+def encode_label(label: str) -> str:
+    """Метка -> percent-encoding для фрагмента vless-ссылки."""
+    return urllib.parse.quote(label, safe="")
+
+
+def replace_link_label(link: str, label: str) -> str:
+    """Меняет хвост ``#...`` у vless-ссылки на нашу метку."""
+    base = link.split("#", 1)[0]
+    return f"{base}#{encode_label(label)}"
+
+
+# --- Случайные значения в стиле 3x-ui --------------------------------------
+
+
+def random_short_ids() -> list[str]:
+    """Пул shortId'ов ровно как их генерирует панель: по одному на каждую
+    чётную длину от 2 до 16 hex-символов."""
+    ids = [secrets.token_hex(n // 2) for n in range(2, 17, 2)]
+    # порядок в панели перемешан; воспроизводим это, чтобы диффы не смущали
+    secrets.SystemRandom().shuffle(ids)
+    return ids
+
+
+def random_spider_x() -> str:
+    """``spiderX`` в ссылках и outbound'ах панели — ``/`` + 15 hex-символов."""
+    return "/" + secrets.token_hex(8)[:15]
+
+
+def random_inbound_spider_x() -> str:
+    """``spiderX`` самого inbound'а — 16 символов base62."""
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    rng = secrets.SystemRandom()
+    return "/" + "".join(rng.choice(alphabet) for _ in range(16))
+
+
+# --- ~/.ssh/config ---------------------------------------------------------
+
+
+def ssh_config_path() -> str:
+    return os.path.expanduser("~/.ssh/config")
+
+
+def parse_ssh_config() -> dict[str, dict[str, str]]:
+    """Читает ``~/.ssh/config`` в словарь ``{host: {ключ: значение}}``."""
+    path = ssh_config_path()
+    if not os.path.exists(path):
+        return {}
+    hosts: dict[str, dict[str, str]] = {}
+    current: str | None = None
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            key, value = parts[0].lower(), parts[1].strip()
+            if key == "host":
+                current = value
+                hosts.setdefault(current, {})
+            elif current is not None:
+                hosts[current][key] = value
+    return hosts
+
+
+def resolve_host(alias: str) -> tuple[str, str]:
+    """По алиасу ``timeweb_nl`` находит в ``~/.ssh/config`` запись
+    ``timeweb_nl_<IP>`` и возвращает ``(host_alias, ip)``."""
+    parse_alias(alias)  # заодно валидируем формат
+    hosts = parse_ssh_config()
+    matches = [h for h in hosts if h.startswith(alias + "_")]
+    if not matches:
+        raise VpnKitError(
+            f"в ~/.ssh/config нет записи для {alias!r}; "
+            f"сначала заведите ключ: python scripts/vpn_ssh_key.py {alias} IP PASSWORD"
+        )
+    if len(matches) > 1:
+        raise VpnKitError(
+            f"в ~/.ssh/config несколько записей под {alias!r}: {', '.join(sorted(matches))}; "
+            "оставьте одну"
+        )
+    host_alias = matches[0]
+    ip = hosts[host_alias].get("hostname") or host_alias[len(alias) + 1 :]
+    return host_alias, ip
+
+
+# --- SSH -------------------------------------------------------------------
+
+
+class Ssh:
+    """SSH-соединение с мультиплексированием.
+
+    Первый вызов поднимает мастер-сокет, все последующие переиспользуют его,
+    поэтому серия из полусотни вызовов API отрабатывает без задержек на
+    установку соединения.
+    """
+
+    def __init__(self, host_alias: str, quiet: bool = False):
+        self.host = host_alias
+        self.quiet = quiet
+        # Путь к управляющему сокету держим коротким: ssh дописывает к нему
+        # ~17 случайных символов, а лимит на длину unix-сокета в macOS — 104,
+        # так что путь во временной директории пользователя уже не влезает.
+        digest = hashlib.sha1(f"{os.getpid()}-{host_alias}".encode()).hexdigest()[:10]
+        self._ctl = f"/tmp/.vpnkit-{digest}"
+        self._sudo: str | None = None
+        atexit.register(self.close)
+
+    @property
+    def _base(self) -> list[str]:
+        return [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=15",
+            "-o", "ControlMaster=auto",
+            "-o", f"ControlPath={self._ctl}",
+            "-o", "ControlPersist=120",
+            self.host,
+        ]
+
+    def run(
+        self,
+        command: str,
+        stdin: str | None = None,
+        check: bool = True,
+        timeout: int = 180,
+    ) -> subprocess.CompletedProcess:
+        proc = subprocess.run(
+            self._base + ["--", command],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if check and proc.returncode != 0:
+            raise VpnKitError(
+                f"[{self.host}] команда завершилась с кодом {proc.returncode}: {command}\n"
+                f"{proc.stderr.strip() or proc.stdout.strip()}"
+            )
+        return proc
+
+    @property
+    def sudo(self) -> str:
+        """Пустая строка для root, иначе ``sudo -n``."""
+        if self._sudo is None:
+            uid = self.run("id -u", check=False).stdout.strip()
+            self._sudo = "" if uid == "0" else "sudo -n "
+        return self._sudo
+
+    def sudo_run(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+        return self.run(f"{self.sudo}{command}", **kwargs)
+
+    def alive(self, timeout: int = 15) -> bool:
+        try:
+            return self.run("true", check=False, timeout=timeout).returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
+    def wait_until_alive(self, deadline_seconds: int = 300) -> None:
+        """Ждёт, пока сервер снова начнёт отвечать (после reboot)."""
+        self.close()
+        started = time.time()
+        while time.time() - started < deadline_seconds:
+            if self.alive():
+                return
+            time.sleep(5)
+        raise VpnKitError(f"[{self.host}] сервер не поднялся за {deadline_seconds} секунд")
+
+    def close(self) -> None:
+        if os.path.exists(self._ctl):
+            subprocess.run(
+                ["ssh", "-o", f"ControlPath={self._ctl}", "-O", "exit", self.host],
+                capture_output=True,
+                text=True,
+            )
+
+
+# --- API панели 3x-ui ------------------------------------------------------
+
+#: Преамбула, которая подтягивает креды панели из файла, оставленного установщиком.
+_PANEL_ENV = (
+    'set -a; . /etc/x-ui/install-result.env; set +a; '
+    'B="http://127.0.0.1:${XUI_PANEL_PORT}/${XUI_WEB_BASE_PATH}"; '
+    'A="Authorization: Bearer ${XUI_API_TOKEN}"; '
+)
+
+
+class Panel:
+    """Клиент API 3x-ui.
+
+    Панель по умолчанию слушает публично, но полагаться на это не хочется:
+    порт может быть закрыт файрволом хостинга. Поэтому каждый запрос
+    выполняется через ``curl`` уже на самом сервере, на 127.0.0.1 — так
+    работает одинаково на любом хостинге и токен не светится в локальных
+    аргументах процессов.
+    """
+
+    def __init__(self, ssh: Ssh):
+        self.ssh = ssh
+
+    # -- низкий уровень --
+
+    def installed(self) -> bool:
+        return (
+            self.ssh.run(
+                "test -f /etc/x-ui/install-result.env && test -x /usr/local/x-ui/x-ui",
+                check=False,
+            ).returncode
+            == 0
+        )
+
+    def _request(self, shell: str, stdin: str | None = None, timeout: int = 180) -> dict:
+        proc = self.ssh.run(
+            f"{self.ssh.sudo}sh -c {shlex.quote(_PANEL_ENV + shell)}",
+            stdin=stdin,
+            timeout=timeout,
+        )
+        body = proc.stdout.strip()
+        if not body:
+            raise VpnKitError(f"[{self.ssh.host}] панель вернула пустой ответ на: {shell}")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise VpnKitError(
+                f"[{self.ssh.host}] панель вернула не JSON: {body[:300]}"
+            ) from exc
+        if not data.get("success", False):
+            raise VpnKitError(
+                f"[{self.ssh.host}] панель отклонила запрос: {data.get('msg') or data}"
+            )
+        return data
+
+    def get(self, path: str, timeout: int = 180) -> dict:
+        return self._request(f'curl -sS -L -H "$A" "$B{path}"', timeout=timeout)
+
+    def post_json(self, path: str, payload: dict | None = None, timeout: int = 180) -> dict:
+        cmd = (
+            'curl -sS -L -X POST -H "$A" -H "Content-Type: application/json" '
+            f'--data-binary @- "$B{path}"'
+        )
+        return self._request(cmd, stdin=json.dumps(payload or {}), timeout=timeout)
+
+    def post_empty(self, path: str, timeout: int = 300) -> dict:
+        return self._request(f'curl -sS -L -X POST -H "$A" "$B{path}"', timeout=timeout)
+
+    def post_form_field(self, path: str, field: str, value: str, timeout: int = 180) -> dict:
+        """POST одного длинного поля формы. Значение уезжает через stdin во
+        временный файл, чтобы не упереться в лимит длины командной строки."""
+        cmd = (
+            't=$(mktemp); cat > "$t"; '
+            f'curl -sS -L -X POST -H "$A" --data-urlencode {shlex.quote(field)}@"$t" "$B{path}"; '
+            'rc=$?; rm -f "$t"; exit $rc'
+        )
+        return self._request(cmd, stdin=value, timeout=timeout)
+
+    # -- inbounds и клиенты --
+
+    def inbounds(self) -> list[dict]:
+        return self.get("/panel/api/inbounds/list").get("obj") or []
+
+    def find_inbound(self, remark: str = INBOUND_REMARK) -> dict | None:
+        for inbound in self.inbounds():
+            if inbound.get("remark") == remark:
+                return inbound
+        return None
+
+    def add_inbound(self, payload: dict) -> dict:
+        return self.post_json("/panel/api/inbounds/add", payload)
+
+    def add_client(self, email: str, inbound_id: int) -> dict:
+        return self.post_json(
+            "/panel/api/clients/add",
+            {"client": {"email": email, "enable": True}, "inboundIds": [inbound_id]},
+        )
+
+    def client_links(self, email: str) -> list[str]:
+        quoted = urllib.parse.quote(email, safe="")
+        return self.get(f"/panel/api/clients/links/{quoted}").get("obj") or []
+
+    def new_x25519(self) -> dict:
+        return self.get("/panel/api/server/getNewX25519Cert")["obj"]
+
+    # -- xray-конфиг (outbounds + routing) --
+
+    def xray_setting(self) -> dict:
+        obj = self.post_empty("/panel/api/xray/")["obj"]
+        if isinstance(obj, str):
+            obj = json.loads(obj)
+        setting = obj["xraySetting"]
+        return json.loads(setting) if isinstance(setting, str) else setting
+
+    def save_xray_setting(self, setting: dict) -> None:
+        self.post_form_field(
+            "/panel/api/xray/update", "xraySetting", json.dumps(setting)
+        )
+
+    def restart_xray(self) -> None:
+        self.post_empty("/panel/api/server/restartXrayService")
+
+    def xray_version(self) -> str | None:
+        obj = self.get("/panel/api/server/status").get("obj") or {}
+        return (obj.get("xray") or {}).get("version")
+
+    def install_xray(self, version: str) -> None:
+        self.post_empty(f"/panel/api/server/installXray/{version}", timeout=600)
+
+
+# --- Вывод -----------------------------------------------------------------
+
+
+def _supports_color() -> bool:
+    return sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+
+
+def step(message: str) -> None:
+    prefix = "\033[36m→\033[0m" if _supports_color() else "->"
+    print(f"{prefix} {message}", flush=True)
+
+
+def ok(message: str) -> None:
+    prefix = "\033[32m✓\033[0m" if _supports_color() else "ok"
+    print(f"{prefix} {message}", flush=True)
+
+
+def warn(message: str) -> None:
+    prefix = "\033[33m!\033[0m" if _supports_color() else "!!"
+    print(f"{prefix} {message}", flush=True)
+
+
+def fail(message: str) -> None:
+    prefix = "\033[31m✗\033[0m" if _supports_color() else "xx"
+    print(f"{prefix} {message}", file=sys.stderr, flush=True)
