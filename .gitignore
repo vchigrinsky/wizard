@@ -4,6 +4,7 @@ _site/
 .jekyll-metadata
 .sass-cache/
 
-# Рабочие ключи VLESS — живые креды, в публичный репозиторий им нельзя
+# Живые креды — в публичный репозиторий им нельзя
 vless.md
+panels.md
 __pycache__/

@@ -39,6 +39,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from vpn_panel_creds import record_panel  # noqa: E402
 from vpnkit import (  # noqa: E402
     INBOUND_REMARK,
     PREFERRED_PORTS,
@@ -67,6 +68,7 @@ from vpnkit import (  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_VLESS_FILE = os.path.join(REPO_ROOT, "vless.md")
+DEFAULT_PANELS_FILE = os.path.join(REPO_ROOT, "panels.md")
 
 #: Маркеры проверки, которые дописывает vpn_check_routes.py.
 STATUS_MARKS = ("✅", "❌")
@@ -450,7 +452,17 @@ def write_vless_entry(path: str, label: str, link: str) -> str:
 # --- Основной сценарий -----------------------------------------------------
 
 
-def build_route(ru_alias: str, foreign_alias: str, vless_file: str) -> str:
+def record_panel_creds(alias: str, ssh: Ssh, panels_file: str) -> None:
+    """Складывает доступы к панели узла в panels.md, если их там ещё нет."""
+    try:
+        action = record_panel(alias, panels_file, ssh=ssh)
+        ok(f"[{ssh.host}] {os.path.basename(panels_file)}: {action}")
+    except VpnKitError as exc:
+        # Связку это не ломает — маршрут уже собран, просто не записались доступы.
+        warn(f"[{ssh.host}] доступы к панели не записались: {exc}")
+
+
+def build_route(ru_alias: str, foreign_alias: str, vless_file: str, panels_file: str) -> str:
     parse_alias(ru_alias)
     parse_alias(foreign_alias)
     if ru_alias == foreign_alias:
@@ -476,6 +488,7 @@ def build_route(ru_alias: str, foreign_alias: str, vless_file: str) -> str:
     # 1. Зарубежный узел: панель, inbound, клиент.
     print("--- зарубежный узел ---")
     foreign_panel = ensure_panel(foreign_ssh, foreign_ip)
+    record_panel_creds(foreign_alias, foreign_ssh, panels_file)
     foreign_inbound = ensure_inbound(foreign_panel, foreign_ssh, foreign_ip, "foreign")
     foreign_email = foreign_client_email(ru_alias)
     foreign_client, foreign_inbound, foreign_new = ensure_client(
@@ -491,6 +504,7 @@ def build_route(ru_alias: str, foreign_alias: str, vless_file: str) -> str:
     # 2. Российский узел: панель, inbound, клиент, outbound, routing.
     print("\n--- российский узел ---")
     ru_panel = ensure_panel(ru_ssh, ru_ip)
+    record_panel_creds(ru_alias, ru_ssh, panels_file)
     ru_inbound = ensure_inbound(ru_panel, ru_ssh, ru_ip, "ru")
     ru_email = ru_client_email(foreign_alias)
     _, ru_inbound, ru_new = ensure_client(ru_panel, ru_ssh, ru_inbound, ru_email)
@@ -535,10 +549,15 @@ def main() -> int:
         default=DEFAULT_VLESS_FILE,
         help=f"куда дописывать ссылку (по умолчанию {DEFAULT_VLESS_FILE})",
     )
+    parser.add_argument(
+        "--panels-file",
+        default=DEFAULT_PANELS_FILE,
+        help=f"куда дописывать доступы к панелям (по умолчанию {DEFAULT_PANELS_FILE})",
+    )
     args = parser.parse_args()
 
     try:
-        build_route(args.alias_ru, args.alias_foreign, args.vless_file)
+        build_route(args.alias_ru, args.alias_foreign, args.vless_file, args.panels_file)
         return 0
     except VpnKitError as exc:
         fail(str(exc))

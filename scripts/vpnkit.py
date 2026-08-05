@@ -83,6 +83,12 @@ def route_label(foreign_alias: str, ru_alias: str) -> str:
     return f"{flag(fc)} {fh} ← {flag(rc)} {rh}"
 
 
+def panel_label(alias: str) -> str:
+    """Метка узла для panels.md: ``timeweb_ru`` -> ``🇷🇺 timeweb``."""
+    hosting, country = parse_alias(alias)
+    return f"{flag(country)} {hosting}"
+
+
 def ru_client_email(foreign_alias: str) -> str:
     fh, fc = parse_alias(foreign_alias)
     return f"{RU_CLIENT_PREFIX}-{fh}-{fc}"
@@ -405,6 +411,72 @@ class Panel:
 
     def install_xray(self, version: str) -> None:
         self.post_empty(f"/panel/api/server/installXray/{version}", timeout=600)
+
+    # -- доступы к самой панели --
+
+    def credentials(self, ip: str | None = None) -> dict[str, str]:
+        """Достаёт URL, логин и пароль панели из файла, оставленного установщиком.
+
+        Значения там записаны через ``printf %q``, поэтому не парсим файл
+        руками, а даём шеллу его прочитать и распечатать уже развёрнутым.
+        """
+        dump = (
+            "set -a; . /etc/x-ui/install-result.env; set +a; "
+            'printf "%s\\n%s\\n%s\\n%s\\n%s\\n" '
+            '"$XUI_ACCESS_URL" "$XUI_USERNAME" "$XUI_PASSWORD" '
+            '"$XUI_PANEL_PORT" "$XUI_WEB_BASE_PATH"'
+        )
+        proc = self.ssh.run(f"{self.ssh.sudo}sh -c {shlex.quote(dump)}")
+        fields = (proc.stdout.splitlines() + [""] * 5)[:5]
+        url, username, password, port, base_path = (f.strip() for f in fields)
+
+        # Установщик подставляет в URL адрес из XUI_SERVER_IP; если его при
+        # установке не передали, хост в URL пустой — тогда собираем сами.
+        if ip and not urllib.parse.urlsplit(url).hostname:
+            url = f"http://{ip}:{port}/{base_path}"
+
+        if not (url and username and password):
+            raise VpnKitError(
+                f"[{self.ssh.host}] в /etc/x-ui/install-result.env нет полного набора "
+                "доступов к панели"
+            )
+        return {"url": url, "username": username, "password": password}
+
+
+# --- panels.md -------------------------------------------------------------
+
+
+def write_panel_entry(path: str, alias: str, creds: dict[str, str]) -> str:
+    """Дозаписывает доступы к панели. Существующую запись не трогает.
+
+    Возвращает описание того, что произошло.
+    """
+    label = panel_label(alias)
+
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    else:
+        lines = ["# 3x-ui panels", ""]
+
+    for line in lines:
+        if line.startswith("## ") and line[3:].strip() == label:
+            return "уже записан, без изменений"
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines += [
+        "",
+        f"## {label}",
+        f"- URL: {creds['url']}",
+        f"- Логин: {creds['username']}",
+        f"- Пароль: {creds['password']}",
+        "",
+    ]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines).rstrip("\n") + "\n")
+    os.chmod(path, 0o600)
+    return "добавлены доступы к панели"
 
 
 # --- Вывод -----------------------------------------------------------------

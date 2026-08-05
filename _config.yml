@@ -11,3 +11,4 @@ exclude:
   - data/*.md
   - scripts/
   - vless.md
+  - panels.md
