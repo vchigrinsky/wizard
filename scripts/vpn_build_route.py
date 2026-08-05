@@ -44,6 +44,7 @@ from vpnkit import (  # noqa: E402
     INBOUND_REMARK,
     PREFERRED_PORTS,
     SNI_BY_ROLE,
+    STATUS_MARKS,
     XRAY_VERSION,
     XUI_INSTALL_URL,
     XUI_VERSION,
@@ -62,6 +63,7 @@ from vpnkit import (  # noqa: E402
     resolve_host,
     route_label,
     ru_client_email,
+    sort_route_file,
     step,
     warn,
 )
@@ -69,9 +71,6 @@ from vpnkit import (  # noqa: E402
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_VLESS_FILE = os.path.join(REPO_ROOT, "vless.md")
 DEFAULT_PANELS_FILE = os.path.join(REPO_ROOT, "panels.md")
-
-#: Маркеры проверки, которые дописывает vpn_check_routes.py.
-STATUS_MARKS = ("✅", "❌")
 
 
 def as_dict(value) -> dict:
@@ -426,27 +425,37 @@ def write_vless_entry(path: str, label: str, link: str) -> str:
     else:
         lines = ["# VLESS keys", ""]
 
+    action = None
     for i, line in enumerate(lines):
         if line.startswith("## ") and strip_mark(line) == label:
             # Ссылка идёт первой непустой строкой после заголовка.
             for j in range(i + 1, len(lines)):
                 if lines[j].startswith("vless://"):
                     if link_identity(lines[j].strip()) == link_identity(link):
-                        return "уже записан, без изменений"
-                    lines[j] = link
-                    with open(path, "w", encoding="utf-8") as fh:
-                        fh.write("\n".join(lines).rstrip("\n") + "\n")
-                    return "ссылка обновлена"
+                        action = "уже записан, без изменений"
+                    else:
+                        lines[j] = link
+                        action = "ссылка обновлена"
+                    break
                 if lines[j].startswith("## "):
                     break
             break
 
-    while lines and not lines[-1].strip():
-        lines.pop()
-    lines += ["", f"## {label}", link, ""]
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines).rstrip("\n") + "\n")
-    return "добавлен новый маршрут"
+    if action is None:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines += ["", f"## {label}", link, ""]
+        action = "добавлен новый маршрут"
+
+    if action != "уже записан, без изменений":
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines).rstrip("\n") + "\n")
+
+    # Файл держим отсортированным при любом исходе — в том числе когда сам
+    # маршрут не менялся, а порядок остался кривым с прошлых прогонов.
+    if sort_route_file(path):
+        action += ", отсортирован"
+    return action
 
 
 # --- Основной сценарий -----------------------------------------------------

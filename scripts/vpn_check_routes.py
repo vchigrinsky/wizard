@@ -51,11 +51,19 @@ import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vpnkit import VpnKitError, fail, ok, step, warn  # noqa: E402
+from vpnkit import (  # noqa: E402
+    STATUS_MARKS,
+    VpnKitError,
+    country_from_flag,
+    fail,
+    ok,
+    sort_route_file,
+    step,
+    warn,
+)
 
-MARK_OK = "✅"
-MARK_BAD = "❌"
-MARKS = (MARK_OK, MARK_BAD)
+MARK_OK, MARK_BAD = STATUS_MARKS
+MARKS = STATUS_MARKS
 
 #: Гео-сервисы для проверки через туннель. Базы у них расходятся, поэтому
 #: спрашиваем несколько и засчитываем совпадение по любому.
@@ -77,20 +85,6 @@ CURL_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Ch
 
 
 # --- Разбор vless.md -------------------------------------------------------
-
-
-def country_from_flag(text: str) -> str | None:
-    """``🇰🇿 selectel ← 🇷🇺 vpsville`` -> ``kz`` (первый флаг в строке)."""
-    letters = []
-    for ch in text:
-        code = ord(ch)
-        if 0x1F1E6 <= code <= 0x1F1FF:
-            letters.append(chr(code - 0x1F1E6 + ord("a")))
-            if len(letters) == 2:
-                return "".join(letters)
-        elif letters:
-            break
-    return None
 
 
 class Route:
@@ -398,6 +392,11 @@ def main() -> int:
         path = os.path.abspath(args.vless_file)
         if not os.path.exists(path):
             raise VpnKitError(f"файл не найден: {path}")
+
+        # Сортируем до разбора: перестановка секций сбила бы номера строк,
+        # по которым потом проставляются отметки.
+        if sort_route_file(path):
+            ok(f"{os.path.basename(path)} отсортирован")
 
         lines, routes = parse_vless_file(path)
         if not routes:

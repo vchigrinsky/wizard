@@ -76,6 +76,28 @@ def flag(country: str) -> str:
     return "".join(chr(0x1F1E6 + ord(c) - ord("a")) for c in country.lower())
 
 
+FLAG_RE = re.compile("[\U0001f1e6-\U0001f1ff]{2}")
+
+
+def country_from_flag(text: str) -> str | None:
+    """``🇰🇿 selectel`` -> ``kz`` (по первому флагу в строке)."""
+    letters: list[str] = []
+    for char in text:
+        code = ord(char)
+        if 0x1F1E6 <= code <= 0x1F1FF:
+            letters.append(chr(code - 0x1F1E6 + ord("a")))
+            if len(letters) == 2:
+                return "".join(letters)
+        elif letters:
+            break
+    return None
+
+
+def split_node_token(text: str) -> tuple[str, str]:
+    """``🇰🇿 selectel`` -> ``("selectel", "kz")``."""
+    return FLAG_RE.sub("", text).strip(), country_from_flag(text) or ""
+
+
 def route_label(foreign_alias: str, ru_alias: str) -> str:
     """Метка маршрута в том же виде, в каком она лежит в vless.md."""
     fh, fc = parse_alias(foreign_alias)
@@ -443,13 +465,116 @@ class Panel:
         return {"url": url, "username": username, "password": password}
 
 
+# --- Сортировка рабочих файлов ---------------------------------------------
+
+#: Маркеры проверки, которые дописывает vpn_check_routes.py.
+STATUS_MARKS = ("✅", "❌")
+
+
+def strip_marks(text: str) -> str:
+    for mark in STATUS_MARKS:
+        text = text.replace(mark, "")
+    return text.strip()
+
+
+def split_sections(lines: list[str]) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """Режет файл на шапку и секции ``## ...`` вместе с их содержимым."""
+    preamble: list[str] = []
+    sections: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+
+    for line in lines:
+        if line.startswith("## "):
+            if current:
+                sections.append(current)
+            current = (line, [])
+        elif current is None:
+            preamble.append(line)
+        else:
+            current[1].append(line)
+    if current:
+        sections.append(current)
+    return preamble, sections
+
+
+def render_sections(preamble: list[str], sections: list[tuple[str, list[str]]]) -> list[str]:
+    out = list(preamble)
+    while out and not out[-1].strip():
+        out.pop()
+    for header, body in sections:
+        trimmed = list(body)
+        while trimmed and not trimmed[-1].strip():
+            trimmed.pop()
+        out += ["", header] + trimmed
+    return out
+
+
+def route_sort_key(header: str) -> tuple:
+    """Порядок маршрутов: по зарубежному узлу, внутри — по российскому.
+
+    Нераспознанные заголовки уезжают в конец, сохраняя исходный порядок
+    между собой (сортировка стабильная).
+    """
+    parts = strip_marks(header[3:]).split("←")
+    if len(parts) != 2:
+        return (1, "", "", "", "")
+    foreign_hosting, foreign_country = split_node_token(parts[0])
+    ru_hosting, ru_country = split_node_token(parts[1])
+    if not (foreign_hosting and foreign_country and ru_hosting):
+        return (1, "", "", "", "")
+    return (0, foreign_hosting, foreign_country, ru_hosting, ru_country)
+
+
+def panel_sort_key(header: str) -> tuple:
+    """Порядок узлов: по хостингу, внутри — по стране."""
+    hosting, country = split_node_token(strip_marks(header[3:]))
+    if not (hosting and country):
+        return (1, "", "")
+    return (0, hosting, country)
+
+
+def sort_file(path: str, key) -> bool:
+    """Пересобирает файл с отсортированными секциями.
+
+    Возвращает True, если порядок действительно поменялся. Содержимое секций
+    не трогается — переставляются только они целиком вместе с заголовками.
+    """
+    if not os.path.exists(path):
+        return False
+
+    with open(path, encoding="utf-8") as fh:
+        original = fh.read()
+
+    preamble, sections = split_sections(original.splitlines())
+    if len(sections) < 2:
+        return False
+
+    ordered = sorted(sections, key=lambda section: key(section[0]))
+    if ordered == sections:
+        return False
+
+    updated = "\n".join(render_sections(preamble, ordered)).rstrip("\n") + "\n"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return True
+
+
+def sort_route_file(path: str) -> bool:
+    return sort_file(path, route_sort_key)
+
+
+def sort_panel_file(path: str) -> bool:
+    return sort_file(path, panel_sort_key)
+
+
 # --- panels.md -------------------------------------------------------------
 
 
 def write_panel_entry(path: str, alias: str, creds: dict[str, str]) -> str:
     """Дозаписывает доступы к панели. Существующую запись не трогает.
 
-    Возвращает описание того, что произошло.
+    Возвращает описание того, что произошло. Файл в любом случае остаётся
+    отсортированным — даже если запись уже была.
     """
     label = panel_label(alias)
 
@@ -459,24 +584,28 @@ def write_panel_entry(path: str, alias: str, creds: dict[str, str]) -> str:
     else:
         lines = ["# 3x-ui panels", ""]
 
-    for line in lines:
-        if line.startswith("## ") and line[3:].strip() == label:
-            return "уже записан, без изменений"
+    existed = any(
+        line.startswith("## ") and line[3:].strip() == label for line in lines
+    )
 
-    while lines and not lines[-1].strip():
-        lines.pop()
-    lines += [
-        "",
-        f"## {label}",
-        f"- URL: {creds['url']}",
-        f"- Логин: {creds['username']}",
-        f"- Пароль: {creds['password']}",
-        "",
-    ]
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines).rstrip("\n") + "\n")
-    os.chmod(path, 0o600)
-    return "добавлены доступы к панели"
+    if not existed:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines += [
+            "",
+            f"## {label}",
+            f"- URL: {creds['url']}",
+            f"- Логин: {creds['username']}",
+            f"- Пароль: {creds['password']}",
+            "",
+        ]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines).rstrip("\n") + "\n")
+        os.chmod(path, 0o600)
+
+    resorted = sort_panel_file(path)
+    action = "уже записан, без изменений" if existed else "добавлены доступы к панели"
+    return f"{action}, отсортирован" if resorted else action
 
 
 # --- Вывод -----------------------------------------------------------------
