@@ -20,18 +20,13 @@ AppleScript-словаря — есть только URL-схема ``v2raytun:/
 SOCKS-прокси же трогает ровно те запросы, которые мы через него сами пустили.
 Маршрут при этом проверяется тот же самый и теми же протоколами.
 
-Критерии
+Критерий
 --------
 
-Разовая проверка на старте (напрямую, мимо туннеля): 2ip.ru должен показывать
-Россию. Это ровно то, что в v2RayTun обеспечивает раздельное туннелирование —
-российские сайты идут в обход VPN. Проверяется один раз, потому что через
-SOCKS-прокси прямой трафик машины не меняется от маршрута к маршруту.
-
-Проверка каждого маршрута (через туннель): страна выхода должна совпасть со
-страной зарубежного узла из названия маршрута. Опрашивается несколько
-гео-сервисов, потому что их базы расходятся между собой — маршрут считается
-рабочим, если ожидаемую страну подтвердил хотя бы один.
+Единственный: страна выхода через туннель должна совпасть со страной
+зарубежного узла из названия маршрута. Опрашивается несколько гео-сервисов,
+потому что их базы расходятся между собой — маршрут считается рабочим, если
+ожидаемую страну подтвердил хотя бы один.
 
 Требуется установленный ``xray`` (``brew install xray``).
 """
@@ -59,7 +54,6 @@ from vpnkit import (  # noqa: E402
     ok,
     sort_route_file,
     step,
-    warn,
 )
 
 MARK_OK, MARK_BAD = STATUS_MARKS
@@ -72,13 +66,6 @@ GEO_PROVIDERS = [
     ("2ip.ua", "https://api.2ip.ua/geo.json", ("country_code",)),
     ("ipwho.is", "https://ipwho.is/", ("country_code",)),
     ("ifconfig.co", "https://ifconfig.co/json", ("country_iso",)),
-]
-
-#: Чем проверяем российскую сторону — сначала то, что просил пользователь.
-RU_PROVIDERS = [
-    ("2ip.ru", "https://2ip.ru/", None),
-    ("2ip.ua", "https://api.2ip.ua/geo.json", ("country_code",)),
-    ("api.myip.com", "https://api.myip.com", ("cc",)),
 ]
 
 CURL_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122 Safari/537.36"
@@ -272,69 +259,42 @@ class LocalTunnel:
 # --- Гео-проверки ----------------------------------------------------------
 
 
-def http_get(url: str, proxy_port: int | None = None, timeout: int = 20) -> str | None:
-    cmd = ["curl", "-sS", "--max-time", str(timeout), "-A", CURL_UA, url]
-    if proxy_port is not None:
-        cmd[1:1] = ["--socks5-hostname", f"127.0.0.1:{proxy_port}"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+def http_get(url: str, proxy_port: int, timeout: int = 20) -> str | None:
+    proc = subprocess.run(
+        [
+            "curl", "-sS",
+            "--socks5-hostname", f"127.0.0.1:{proxy_port}",
+            "--max-time", str(timeout),
+            "-A", CURL_UA,
+            url,
+        ],
+        capture_output=True,
+        text=True,
+    )
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     return proc.stdout
 
 
-def extract_country(body: str, keys: tuple[str, ...] | None) -> str | None:
-    """Достаёт код страны из JSON-ответа или из HTML 2ip.ru."""
-    if keys:
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            return None
-        for key in keys:
-            value = data.get(key)
-            if isinstance(value, str) and len(value) == 2:
-                return value.lower()
+def extract_country(body: str, keys: tuple[str, ...]) -> str | None:
+    """Достаёт двухбуквенный код страны из JSON-ответа гео-сервиса."""
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
         return None
-
-    # 2ip.ru отдаёт страну в разметке; ищем и по коду, и по названию.
-    import re
-
-    lowered = body.lower()
-    for pattern in (
-        r'"country_code"\s*:\s*"([a-z]{2})"',
-        r"data-country=[\"']([a-z]{2})[\"']",
-        r"/flags?/([a-z]{2})\.(?:png|svg|gif)",
-    ):
-        found = re.search(pattern, lowered)
-        if found:
-            return found.group(1)
-    if "росси" in lowered or "russia" in lowered:
-        return "ru"
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and len(value) == 2:
+            return value.lower()
     return None
 
 
-def probe(providers, proxy_port: int | None) -> list[tuple[str, str | None]]:
+def probe(providers, proxy_port: int) -> list[tuple[str, str | None]]:
     results = []
     for name, url, keys in providers:
         body = http_get(url, proxy_port=proxy_port)
         results.append((name, extract_country(body, keys) if body else None))
     return results
-
-
-def baseline_check() -> bool:
-    """Разовая проверка: без туннеля мы должны выглядеть как из России."""
-    step("проверяю исходное состояние (напрямую, мимо туннеля)")
-    for name, url, keys in RU_PROVIDERS:
-        body = http_get(url, proxy_port=None)
-        country = extract_country(body, keys) if body else None
-        if country:
-            if country == "ru":
-                ok(f"{name}: Россия — раздельное туннелирование в порядке")
-                return True
-            warn(f"{name}: страна {country.upper()}, а ожидалась RU")
-            return False
-        warn(f"{name}: не ответил или страна не распозналась, пробую следующий")
-    warn("ни один сервис не ответил напрямую")
-    return False
 
 
 def check_route(xray: str, route: Route) -> tuple[bool, str]:
@@ -376,11 +336,6 @@ def main() -> int:
         help="перепроверить в том числе уже размеченные маршруты",
     )
     parser.add_argument(
-        "--skip-baseline",
-        action="store_true",
-        help="не проверять исходное состояние (например, если вы не в России)",
-    )
-    parser.add_argument(
         "--to-clipboard",
         action="store_true",
         help="положить все ссылки в буфер обмена для импорта в v2RayTun",
@@ -406,14 +361,6 @@ def main() -> int:
             payload = "\n".join(r.link for r in routes)
             subprocess.run(["pbcopy"], input=payload, text=True, check=True)
             ok(f"{len(routes)} ссылок в буфере обмена — в v2RayTun импорт из буфера")
-
-        if not args.skip_baseline and not baseline_check():
-            fail(
-                "исходное состояние не сходится: похоже, включён другой VPN "
-                "или вы не в России. Выключите посторонние VPN и повторите, "
-                "либо запустите с --skip-baseline"
-            )
-            return 1
 
         pending = [r for r in routes if args.recheck or not r.mark]
         skipped = len(routes) - len(pending)
