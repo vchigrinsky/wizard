@@ -63,6 +63,7 @@ from vpnkit import (  # noqa: E402
     STATUS_MARKS,
     VpnKitError,
     country_from_flag,
+    env_without_proxy,
     fail,
     ok,
     sort_route_file,
@@ -336,6 +337,7 @@ def http_get(url: str, proxy_port: int, timeout: int = 20) -> str | None:
         ],
         capture_output=True,
         text=True,
+        env=env_without_proxy(),
     )
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
@@ -379,6 +381,7 @@ def download_stream(proxy_port: int, size_bytes: int, timeout: int) -> dict:
         ],
         capture_output=True,
         text=True,
+        env=env_without_proxy(),
     )
     downloaded, status = 0, 0
     if proc.stdout.strip():

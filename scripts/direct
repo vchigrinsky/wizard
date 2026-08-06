@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Выполнить команду в обход прокси — с настоящего сетевого выхода машины.
+#
+#     scripts/direct curl -sS https://api.myip.com
+#     scripts/direct python3 scripts/vpn_check_routes.py vless.md
+#
+# Нужно, когда в окружении стоят HTTP_PROXY/HTTPS_PROXY (например, прокси
+# прописан приложению через env), а измерить надо именно свою сеть. Без этого
+# curl молча уходит в прокси, и диагностика показывает страну прокси вместо
+# страны провайдера — ошибка, которую легко не заметить.
+#
+# С флагом --check сначала печатает, откуда реально виден выход.
+set -euo pipefail
+
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY FTP_PROXY NO_PROXY \
+      http_proxy https_proxy all_proxy ftp_proxy no_proxy
+
+if [[ "${1:-}" == "--check" ]]; then
+    shift
+    echo "выход: $(curl -sS --noproxy '*' --max-time 15 https://api.myip.com 2>/dev/null || echo '(не определился)')" >&2
+fi
+
+[[ $# -eq 0 ]] && { echo "использование: scripts/direct [--check] КОМАНДА [АРГУМЕНТЫ...]" >&2; exit 2; }
+
+exec "$@"
