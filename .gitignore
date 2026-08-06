@@ -7,4 +7,5 @@ _site/
 # Живые креды — в публичный репозиторий им нельзя
 vless.md
 panels.md
+direct.md
 __pycache__/

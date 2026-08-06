@@ -12,3 +12,4 @@ exclude:
   - scripts/
   - vless.md
   - panels.md
+  - direct.md
