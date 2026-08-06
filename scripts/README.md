@@ -229,6 +229,23 @@ ZeroOmega — профиль типа Proxy, протокол SOCKS5, серве
 (curl и git — да, requests без отдельной зависимости — нет), а HTTP-инбаунд
 принимает и обычные запросы, и CONNECT для HTTPS, поэтому годится всем.
 
+### Фоновый режим
+
+```bash
+python scripts/vpn_proxy.py 'ishosting ← 🇷🇺 beget' --install-agent
+python scripts/vpn_proxy.py --status
+python scripts/vpn_proxy.py --uninstall-agent
+```
+
+Ставит прокси агентом launchd: поднимается сам, переживает перезагрузку,
+терминал держать не нужно. Конфиг с ключом кладётся в
+`~/Library/Application Support/vpnkit/proxy.json` с правами `600`, лог —
+в `~/Library/Logs/vpnkit-proxy.log`.
+
+Так удобно снимать системный TUN: ВПН выключен, сеть родная, а отдельное
+приложение (например, Claude) ходит через прокси по своей переменной
+окружения. Для Claude это `env` в `~/.claude/settings.json`.
+
 ### Почему не демон на сервере
 
 Соблазнительно поставить на узел dante, 3proxy или squid и ходить прямо на

@@ -48,6 +48,80 @@ DEFAULT_VLESS_FILE = os.path.join(REPO_ROOT, "vless.md")
 DEFAULT_SOCKS_PORT = 1080
 DEFAULT_HTTP_PORT = 1081
 
+#: Фоновый агент: чтобы прокси поднимался сам и переживал перезагрузку.
+AGENT_LABEL = "com.vuutya.vpn-proxy"
+AGENT_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{AGENT_LABEL}.plist")
+AGENT_DIR = os.path.expanduser("~/Library/Application Support/vpnkit")
+AGENT_CONFIG = os.path.join(AGENT_DIR, "proxy.json")
+AGENT_LOG = os.path.expanduser("~/Library/Logs/vpnkit-proxy.log")
+
+
+def plist_body(xray: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{AGENT_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{xray}</string>
+        <string>run</string>
+        <string>-c</string>
+        <string>{AGENT_CONFIG}</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>{AGENT_LOG}</string>
+    <key>StandardErrorPath</key><string>{AGENT_LOG}</string>
+</dict>
+</plist>
+"""
+
+
+def agent_loaded() -> bool:
+    proc = subprocess.run(
+        ["launchctl", "list", AGENT_LABEL], capture_output=True, text=True
+    )
+    return proc.returncode == 0
+
+
+def unload_agent(quiet: bool = False) -> None:
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{AGENT_LABEL}"],
+        capture_output=True,
+        text=True,
+    )
+    if not quiet:
+        ok("агент выгружен")
+
+
+def install_agent(route, socks_port: int, http_port: int, xray: str) -> None:
+    """Ставит прокси фоновым сервисом: сам стартует и переживает перезагрузку."""
+    os.makedirs(AGENT_DIR, exist_ok=True)
+    with open(AGENT_CONFIG, "w", encoding="utf-8") as fh:
+        json.dump(build_config(route.link, socks_port, http_port), fh, indent=1)
+    os.chmod(AGENT_CONFIG, 0o600)
+
+    os.makedirs(os.path.dirname(AGENT_PLIST), exist_ok=True)
+    with open(AGENT_PLIST, "w", encoding="utf-8") as fh:
+        fh.write(plist_body(xray))
+
+    unload_agent(quiet=True)
+    proc = subprocess.run(
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", AGENT_PLIST],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise VpnKitError(
+            f"launchctl не принял агент: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    ok(f"агент установлен и запущен ({AGENT_LABEL})")
+    print(f"    конфиг: {AGENT_CONFIG}")
+    print(f"    лог:    {AGENT_LOG}")
+    print("    снять:  python scripts/vpn_proxy.py --uninstall-agent")
+
 
 def build_config(link: str, socks_port: int, http_port: int) -> dict:
     """SOCKS5 и HTTP внутрь, VLESS/REALITY наружу.
@@ -120,7 +194,30 @@ def main() -> int:
     parser.add_argument("--vless-file", default=DEFAULT_VLESS_FILE, help="путь к vless.md")
     parser.add_argument("--socks-port", type=int, default=DEFAULT_SOCKS_PORT)
     parser.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT)
+    parser.add_argument(
+        "--install-agent",
+        action="store_true",
+        help="поставить прокси фоновым сервисом: сам стартует и переживает перезагрузку",
+    )
+    parser.add_argument(
+        "--uninstall-agent", action="store_true", help="снять фоновый сервис"
+    )
+    parser.add_argument("--status", action="store_true", help="показать состояние сервиса")
     args = parser.parse_args()
+
+    if args.uninstall_agent:
+        unload_agent()
+        for path in (AGENT_PLIST, AGENT_CONFIG):
+            if os.path.exists(path):
+                os.unlink(path)
+        ok("файлы агента удалены")
+        return 0
+
+    if args.status:
+        print(f"агент {AGENT_LABEL}: {'запущен ✓' if agent_loaded() else 'не установлен'}")
+        if os.path.exists(AGENT_CONFIG):
+            print(f"конфиг: {AGENT_CONFIG}")
+        return 0
 
     config_path = None
     process = None
@@ -152,6 +249,11 @@ def main() -> int:
         route = found[0]
         if route.mark == "❌":
             step(f"внимание: маршрут помечен ❌ — {route.label}")
+
+        if args.install_agent:
+            install_agent(route, args.socks_port, args.http_port, xray)
+            print_usage_hints(args.socks_port, args.http_port, route.label)
+            return 0
 
         handle, config_path = tempfile.mkstemp(suffix=".json", prefix="vpnproxy-")
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
