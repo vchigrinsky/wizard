@@ -10,3 +10,4 @@ panels.md
 direct.md
 __pycache__/
 snapshots/
+scripts/*.jsonl

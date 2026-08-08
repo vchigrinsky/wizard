@@ -51,8 +51,13 @@ MAX_BULK = 64 * 1024 * 1024
 #: Порты подобраны так, чтобы не спорить с тем, что уже работает на узле
 #: (443 занят Xray, 22 — SSH, 53 — резолвером), и при этом покрыть разные
 #: «категории»: обычный веб, типичные альтернативы HTTPS, высокий порт.
-DEFAULT_TCP = [80, 2053, 8080, 8443, 9443, 40000]
-DEFAULT_UDP = [2053, 8443, 40000, 51820]
+DEFAULT_TCP = [80, 2053, 5222, 8080, 8443, 9443, 40000]
+
+#: UDP-порты подобраны не абы как, а по «профессиям»: 53 — DNS, 443 — QUIC,
+#: 500 — IPsec, 1194 — OpenVPN, 51820 — WireGuard. Фильтры часто относятся к
+#: ним по-разному, и по тому, какие уцелели, видно, какой аварийный канал
+#: вообще возможен.
+DEFAULT_UDP = [53, 443, 500, 1194, 2053, 8443, 40000, 51820]
 
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beacon-log.jsonl")
 UNIT_NAME = "blackout-beacon"
@@ -253,7 +258,10 @@ WantedBy=multi-user.target
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(unit)
     os.system("systemctl daemon-reload")
-    os.system(f"systemctl enable --now {UNIT_NAME}")
+    os.system(f"systemctl enable {UNIT_NAME}")
+    # Именно restart, а не `enable --now`: последний не трогает уже запущенную
+    # службу, и повторная установка молча оставила бы старый список портов.
+    os.system(f"systemctl restart {UNIT_NAME}")
     print(f"служба {UNIT_NAME} установлена и запущена")
     print(f"смотреть: journalctl -u {UNIT_NAME} -f   или   {LOG_PATH}")
 
