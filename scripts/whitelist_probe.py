@@ -106,6 +106,13 @@ SNI_GROUPS: dict[str, list[str]] = {
     "разрешённые: операторы связи": [
         "mts.ru", "beeline.ru", "megafon.ru", "tele2.ru", "rt.ru",
     ],
+    # Имена, которые сообщество отобрало опытным путём: именно они стоят в
+    # чужих конфигах, помеченных как работающие под белыми списками. Держим
+    # отдельной группой — это самая ценная выборка, проверенная не нами.
+    "проверенные сообществом": [
+        "www.avito.ru", "avito.ru", "vk.com", "vkvideo.ru",
+        "rutube.ru", "api-maps.yandex.ru", "iv.kommersant.ru",
+    ],
     "заблокированные в РФ": [
         "youtube.com", "www.youtube.com", "googlevideo.com",
         "instagram.com", "facebook.com", "x.com", "twitter.com",
