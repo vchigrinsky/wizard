@@ -13,3 +13,4 @@ exclude:
   - vless.md
   - panels.md
   - direct.md
+  - snapshots/
