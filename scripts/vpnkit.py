@@ -330,9 +330,16 @@ class Ssh:
 # --- API панели 3x-ui ------------------------------------------------------
 
 #: Преамбула, которая подтягивает креды панели из файла, оставленного установщиком.
+#:
+#: Схему берём не наугад: часть узлов ставилась с TLS на самой панели, и там
+#: она слушает https. Установщик записывает готовый адрес в XUI_ACCESS_URL —
+#: по нему и определяем. Проверку сертификата снимаем всегда: идём на
+#: 127.0.0.1, где у панели самоподписанный сертификат на внешний адрес, так
+#: что проверка не прошла бы никогда, а трафик наружу при этом не выходит.
 _PANEL_ENV = (
     'set -a; . /etc/x-ui/install-result.env; set +a; '
-    'B="http://127.0.0.1:${XUI_PANEL_PORT}/${XUI_WEB_BASE_PATH}"; '
+    'case "$XUI_ACCESS_URL" in https://*) S=https;; *) S=http;; esac; '
+    'B="${S}://127.0.0.1:${XUI_PANEL_PORT}/${XUI_WEB_BASE_PATH}"; '
     'A="Authorization: Bearer ${XUI_API_TOKEN}"; '
 )
 
@@ -383,24 +390,24 @@ class Panel:
         return data
 
     def get(self, path: str, timeout: int = 180) -> dict:
-        return self._request(f'curl -sS -L -H "$A" "$B{path}"', timeout=timeout)
+        return self._request(f'curl -sS -L -k -H "$A" "$B{path}"', timeout=timeout)
 
     def post_json(self, path: str, payload: dict | None = None, timeout: int = 180) -> dict:
         cmd = (
-            'curl -sS -L -X POST -H "$A" -H "Content-Type: application/json" '
+            'curl -sS -L -k -X POST -H "$A" -H "Content-Type: application/json" '
             f'--data-binary @- "$B{path}"'
         )
         return self._request(cmd, stdin=json.dumps(payload or {}), timeout=timeout)
 
     def post_empty(self, path: str, timeout: int = 300) -> dict:
-        return self._request(f'curl -sS -L -X POST -H "$A" "$B{path}"', timeout=timeout)
+        return self._request(f'curl -sS -L -k -X POST -H "$A" "$B{path}"', timeout=timeout)
 
     def post_form_field(self, path: str, field: str, value: str, timeout: int = 180) -> dict:
         """POST одного длинного поля формы. Значение уезжает через stdin во
         временный файл, чтобы не упереться в лимит длины командной строки."""
         cmd = (
             't=$(mktemp); cat > "$t"; '
-            f'curl -sS -L -X POST -H "$A" --data-urlencode {shlex.quote(field)}@"$t" "$B{path}"; '
+            f'curl -sS -L -k -X POST -H "$A" --data-urlencode {shlex.quote(field)}@"$t" "$B{path}"; '
             'rc=$?; rm -f "$t"; exit $rc'
         )
         return self._request(cmd, stdin=value, timeout=timeout)
