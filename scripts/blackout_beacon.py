@@ -107,6 +107,15 @@ class TcpHandler(socketserver.BaseRequestHandler):
 
         want = parse_bulk(data)
         try:
+            if is_http_get(data):
+                # Пришли браузером — отвечаем настоящей страницей. Так маяк
+                # превращается в проверку «по адресу, без имени»: страница
+                # открылась — значит трафик ходит и дело не в туннеле, а выше.
+                # А строка «пришли с» показывает, через какой узел вы вышли.
+                self.request.sendall(http_page(port, self.client_address[0]))
+                event["http"] = True
+                record(event)
+                return
             self.request.sendall(MARKER + b" port=%d\n" % port)
             if want:
                 event["bulk_requested"] = want
@@ -132,6 +141,36 @@ class UdpHandler(socketserver.BaseRequestHandler):
             sock.sendto(MARKER + b" udp=%d\n" % port, self.client_address)
         except OSError:
             pass
+
+
+def is_http_get(data: bytes) -> bool:
+    return data[:4] in (b"GET ", b"HEAD") or data[:5] == b"POST "
+
+
+def http_page(port: int, peer: str) -> bytes:
+    """Страница для проверки браузером — намеренно без единого имени внутри.
+
+    Открывается по голому адресу, поэтому DNS для неё не нужен вовсе: если
+    она отображается, значит трафик до сервера доходит, и искать надо выше.
+    Строка «пришли с» — это адрес, который увидел сервер: свой домашний или
+    адрес выходного узла, если включён туннель.
+    """
+    body = (
+        "МАЯК ОТВЕТИЛ\n\n"
+        f"порт:        {port}\n"
+        f"пришли с:    {peer}\n"
+        f"время:       {now()}\n\n"
+        "Если вы это видите — трафик до сервера доходит.\n"
+        "Смотрите на строку «пришли с»: это адрес, который видит сервер.\n"
+    ).encode("utf-8")
+    head = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    return head + body
 
 
 def extract_sni(data: bytes) -> str | None:
